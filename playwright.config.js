@@ -16,7 +16,7 @@ export default defineConfig({
   workers: 2,
   expect: {timeout: 15_000},
   use: {
-    baseURL: `http://localhost:${APP_PORT}/`,
+    baseURL: process.env.PLAYWRIGHT_BASE_URL ?? `http://localhost:${APP_PORT}/`,
     trace: {mode: 'retain-on-failure', screenshots: false, snapshots: false},
     launchOptions: {executablePath: process.env.CHROMIUM_PATH ?? undefined},
   },
