@@ -8,6 +8,11 @@ import {RenderPass} from 'three/addons/postprocessing/RenderPass.js';
 import {UnrealBloomPass} from 'three/addons/postprocessing/UnrealBloomPass.js';
 import {CSS2DObject, CSS2DRenderer} from 'three/addons/renderers/CSS2DRenderer.js';
 
+import {AstraUI} from './modules/astraUI.js';
+import {JupiterAtmosphere} from './modules/jupiterAtmosphere.js';
+import {MarsSurface} from './modules/marsSurface.js';
+import {SurvivalEngine} from './modules/survivalEngine.js';
+
 const BASE_URL = import.meta.env.BASE_URL;
 
 const CONFIG = {
@@ -306,6 +311,7 @@ const state = {
   // The flight to a newly focused planet while it is in progress: where the camera and the target started,
   // where the camera ends relative to the planet, and how far along it is.
   flight: null,
+  mode: 'system', // 'system' | 'explore'
 };
 
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -335,6 +341,10 @@ const loadingManager = createLoadingManager();
 const textureLoader = new THREE.TextureLoader(loadingManager);
 
 let uiElements = null;
+let survivalEngine = null;
+let astraUI = null;
+let marsSurface = null;
+let jupiterAtmosphere = null;
 
 function countTextures() {
   return Object.values(TEXTURES).reduce((total, entry) => total + Object.keys(entry).length, 0);
@@ -790,6 +800,10 @@ function updatePlanetInfo() {
 
   uiElements.planetName.textContent = formatPlanetName(state.selectedPlanet);
   uiElements.planetDescription.textContent = planet.config.description;
+
+  if (astraUI) {
+    astraUI.updateQuickSpecs(state.selectedPlanet);
+  }
 }
 
 function updateActivePlanetButton() {
@@ -816,13 +830,13 @@ function formatPlanetName(name) {
  * flat disc. Approaching from wherever the camera happened to be could land it on the night side, where the
  * planet is a black circle.
  */
-function focusOffset(planet, planetPosition) {
+function focusOffset(planet, planetPosition, distanceFactor = CONFIG.focus.distanceFactor) {
   const towardsSun = new THREE.Vector3().sub(planetPosition).setY(0).normalize();
   const direction = towardsSun
     .applyAxisAngle(ORBIT_AXIS, THREE.MathUtils.degToRad(CONFIG.focus.sideAngle))
     .setY(Math.tan(THREE.MathUtils.degToRad(CONFIG.focus.elevation)))
     .normalize();
-  const distance = Math.max(planet.radius * CONFIG.focus.distanceFactor, CONFIG.focus.minDistance);
+  const distance = Math.max(planet.radius * distanceFactor, CONFIG.focus.minDistance);
 
   return direction.multiplyScalar(distance);
 }
@@ -832,7 +846,7 @@ function focusOffset(planet, planetPosition) {
  * CONFIG.focus.flightDuration, aiming at where the planet is on each frame rather than where it was when the
  * flight began, and jumps straight there when the visitor prefers reduced motion.
  */
-function focusPlanet(name) {
+function focusPlanet(name, closeInspection = false) {
   const planet = planets.get(name);
 
   if (!planet) {
@@ -845,7 +859,8 @@ function focusPlanet(name) {
   planet.mesh.getWorldPosition(followPosition);
   lastFollowPosition.copy(followPosition);
 
-  const offset = focusOffset(planet, followPosition);
+  const factor = closeInspection ? Math.max(CONFIG.focus.clearanceFactor, 2.8) : CONFIG.focus.distanceFactor;
+  const offset = focusOffset(planet, followPosition, factor);
 
   // The system-wide minimum zoom distance is larger than the focus distance of every planet, so it is
   // relaxed per planet; otherwise OrbitControls pushes the camera straight back out on the next update.
@@ -873,10 +888,62 @@ function focusPlanet(name) {
   updateActivePlanetButton();
   updateFollowUI();
 
+  if (astraUI) {
+    astraUI.updateQuickSpecs(name);
+  }
+  if (survivalEngine) {
+    survivalEngine.setPlanet(name);
+  }
+
   // On a phone the open panel covers the planet the camera is flying to.
   if (uiElements && phoneLayout.matches) {
     setPanelFolded(true);
   }
+}
+
+function explorePlanet(name) {
+  if (name === 'mars' && marsSurface) {
+    state.mode = 'mars_surface';
+    marsSurface.resetCamera();
+    if (labelRenderer) {
+      labelRenderer.domElement.style.display = 'none';
+    }
+    if (astraUI) {
+      astraUI.setViewMode('surface');
+      astraUI.setExplorationMode(true);
+    }
+  } else if (name === 'jupiter' && jupiterAtmosphere) {
+    state.mode = 'jupiter_atmosphere';
+    jupiterAtmosphere.resetFlight();
+    if (labelRenderer) {
+      labelRenderer.domElement.style.display = 'none';
+    }
+    if (astraUI) {
+      astraUI.setViewMode('orbit');
+      astraUI.setExplorationMode(true);
+    }
+  } else {
+    state.mode = 'explore';
+    if (labelRenderer) {
+      labelRenderer.domElement.style.display = 'block';
+    }
+    focusPlanet(name, true);
+    if (astraUI) {
+      astraUI.setViewMode('orbit');
+      astraUI.setExplorationMode(true);
+    }
+  }
+}
+
+function returnToSystem() {
+  state.mode = 'system';
+  if (labelRenderer) {
+    labelRenderer.domElement.style.display = 'block';
+  }
+  if (astraUI) {
+    astraUI.setExplorationMode(false);
+  }
+  resetCamera();
 }
 
 const easeInOutCubic = (t) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
@@ -1261,10 +1328,16 @@ function resetCamera() {
   controls.target.set(0, 0, 0);
   controls.minDistance = CONFIG.controls.minDistance;
   state.selectedPlanet = 'earth';
+  state.mode = 'system';
   stopFollowing();
 
   updatePlanetInfo();
   updateActivePlanetButton();
+
+  if (astraUI) {
+    astraUI.setExplorationMode(false);
+    astraUI.updateQuickSpecs('earth');
+  }
 }
 
 function togglePause() {
@@ -1278,8 +1351,8 @@ function headerMarkup() {
   return `
     <div class="ui__header">
       <div>
-        <h1>Solar System</h1>
-        <p class="ui__subtitle">Interactive Three.js simulation</p>
+        <h1>ASTRA: Solar System</h1>
+        <p class="ui__subtitle">Interactive 3D Keplerian simulation</p>
         <p id="panel-summary" class="ui__summary"></p>
       </div>
 
@@ -1537,6 +1610,12 @@ function resize() {
   renderer.setPixelRatio(getPixelRatio());
   labelRenderer.setSize(window.innerWidth, window.innerHeight);
   resizePostProcessing();
+  if (marsSurface) {
+    marsSurface.resize(window.innerWidth, window.innerHeight);
+  }
+  if (jupiterAtmosphere) {
+    jupiterAtmosphere.resize(window.innerWidth, window.innerHeight);
+  }
 }
 
 function resizePostProcessing() {
@@ -1552,11 +1631,30 @@ function animate() {
 
   const delta = timer.getDelta();
 
-  animatePlanets(delta);
-  updateFollow(delta);
-  controls.update();
-  renderScene();
-  labelRenderer.render(scene, camera);
+  if (state.mode === 'mars_surface' && marsSurface) {
+    marsSurface.update(delta);
+    marsSurface.render(renderer);
+    if (astraUI) {
+      astraUI.updateRoverTelemetry(marsSurface.getRoverTelemetry());
+    }
+  } else if (state.mode === 'jupiter_atmosphere' && jupiterAtmosphere) {
+    jupiterAtmosphere.update(delta);
+    jupiterAtmosphere.render(renderer);
+    if (astraUI) {
+      astraUI.updateJupiterTelemetry(jupiterAtmosphere.getAtmosphericTelemetry());
+    }
+  } else {
+    animatePlanets(delta);
+    updateFollow(delta);
+    controls.update();
+    renderScene();
+    labelRenderer.render(scene, camera);
+  }
+
+  if (survivalEngine && astraUI && astraUI.isExplorationMode) {
+    const telemetry = survivalEngine.update(delta);
+    astraUI.updateSurvivalTelemetry(telemetry);
+  }
 }
 
 async function init() {
@@ -1593,6 +1691,85 @@ async function init() {
   addLabels();
   createUI();
   enablePicking();
+
+  // Initialize ASTRA subsystems
+  survivalEngine = new SurvivalEngine();
+  marsSurface = new MarsSurface(renderer);
+  jupiterAtmosphere = new JupiterAtmosphere(renderer);
+
+  astraUI = new AstraUI({
+    onEnterSystem: () => {
+      // Focus planet or keep system view
+    },
+    onExplorePlanet: (planetName) => {
+      explorePlanet(planetName);
+    },
+    onReturnToSystem: () => {
+      returnToSystem();
+    },
+    onPlanetSelected: (planetName) => {
+      focusPlanet(planetName);
+    },
+    onEquipmentChange: (system, value) => {
+      survivalEngine.setEquipment(system, value);
+    },
+    onEventToggle: (eventName, active) => {
+      survivalEngine.setEvent(eventName, active);
+      if (marsSurface) {
+        if (eventName === 'dustStorm') {
+          marsSurface.setDustStorm(active);
+        }
+        if (eventName === 'temperatureDrop') {
+          marsSurface.setTemperatureDrop(active);
+        }
+      }
+    },
+    onResetEquipment: () => {
+      survivalEngine.resetEquipment();
+      if (marsSurface) {
+        marsSurface.setDustStorm(false);
+        marsSurface.setTemperatureDrop(false);
+      }
+    },
+    onViewModeChange: (mode) => {
+      if (state.selectedPlanet === 'mars') {
+        if (mode === 'surface') {
+          state.mode = 'mars_surface';
+          if (labelRenderer) {
+            labelRenderer.domElement.style.display = 'none';
+          }
+          marsSurface.resetCamera();
+        } else {
+          state.mode = 'explore';
+          if (labelRenderer) {
+            labelRenderer.domElement.style.display = 'block';
+          }
+          focusPlanet('mars', true);
+        }
+      }
+    },
+    onRoverControl: (cmd, active) => {
+      if (marsSurface && marsSurface.inputs) {
+        marsSurface.inputs[cmd] = active;
+      }
+    },
+    onCameraModeChange: (mode) => {
+      if (state.mode === 'mars_surface' && marsSurface) {
+        marsSurface.setCameraMode(mode);
+      } else if (state.mode === 'jupiter_atmosphere' && jupiterAtmosphere) {
+        jupiterAtmosphere.setCameraMode(mode);
+      }
+    },
+    onJupiterFlightControl: (cmd, active) => {
+      if (jupiterAtmosphere && jupiterAtmosphere.inputs) {
+        jupiterAtmosphere.inputs[cmd] = active;
+      }
+    },
+  });
+
+  astraUI.enrichExistingPlanetPanel(uiElements);
+  astraUI.updateQuickSpecs(state.selectedPlanet);
+
   resetCamera();
   hideLoader();
 }
